@@ -1,4 +1,4 @@
-from brownie import Contract, chain
+from brownie import ZERO_ADDRESS, Contract, chain
 from scripts.utils.float2int import to_int
 from .utils import odos
 
@@ -7,19 +7,113 @@ CONTROLLER = "0x1337F001E280420EcCe9E7B934Fa07D67fdb62CD"
 MONEY = "0x69420f9e38a4e60a62224c489be4bf7a94402496"
 
 
-def get_create_loan_routing_data(zap, account, market, coll_amount, debt_amount):
-    # TODO
-    pass
+def get_create_loan_routing_data(
+    zap, market, coll_amount, debt_amount, num_bands, max_slippage=0.003
+):
+    """
+    Generates the `routingData` input for use with `LeverageZap.createLoan`
+
+    Note that Odos' quotes are valid for 60 seconds, if the generated data is not used within
+    that timeframe it will need to be re-queried.
+
+    Args:
+        zap: Address of `LeverageZap` deployment on the connected chain
+        market: Address of the market where the loan is being created
+        coll_amount: Amount of collateral supplied by the caller.
+        debt_amount: Amount of stablecoins to open a loan for. This entire amount is swapped
+            for additional collateral, that is also deposited when opening the loan.
+        num_bands: Number of bands to use for the loan
+        max_slippage: Maximum allowable slippage in the router swap, denoted as a fraction.
+
+    Returns:
+        string: `routingData` for use in `LeverageZap.createLoan`
+        int: Total collateral that will be backing the new loan, as an integer with 1e18 precision
+        int: Health of the new loan
+    """
+    controller = Contract(CONTROLLER)
+    market = Contract(market)
+    collateral = Contract(controller.get_collateral(market))
+
+    coll_in, path_id = odos.get_quote(chain.id, zap, MONEY, collateral, debt_amount, max_slippage)
+
+    total_coll = coll_amount + coll_in
+    health = market.pending_account_state_calculator(
+        ZERO_ADDRESS, total_coll, debt_amount, num_bands
+    )
+
+    return odos.get_route_calldata(zap, path_id), total_coll, health
 
 
-def get_increase_loan_routing_data(zap, account, market, coll_amount, debt_amount):
-    # TODO
-    pass
+def get_increase_loan_routing_data(
+    zap, account, market, coll_amount, debt_amount, max_slippage=0.003
+):
+    """
+    Generates the `routingData` input for use with `LeverageZap.increaseLoan`
+
+    Note that Odos' quotes are valid for 60 seconds, if the generated data is not used within
+    that timeframe it will need to be re-queried.
+
+    Args:
+        zap: Address of `LeverageZap` deployment on the connected chain
+        account: Address of the account that will adjust a loan
+        market: Address of the market where the loan is being adjusted
+        coll_amount: Amount of collateral to be added by `account`. Can be left as zero if
+            collateral is only being increased via the debt swap.
+        debt_amount: Amount of debt to increase the loan by. The entire amount is swapped
+            for collateral which is added to the loan.
+        max_slippage: Maximum allowable slippage in the router swap, denoted as a fraction.
+
+    Returns:
+        string: `routingData` for use in `LeverageZap.increaseLoan`
+        int: Total loan collateral after the adjustment
+        int: New loan health after the adjustment
+    """
+
+    controller = Contract(CONTROLLER)
+    market = Contract(market)
+    collateral = Contract(controller.get_collateral(market))
+
+    coll_in, path_id = odos.get_quote(chain.id, zap, MONEY, collateral, debt_amount, max_slippage)
+
+    coll_existing = market.user_state(account)[0]
+    total_coll = coll_existing + coll_amount + coll_in
+    health = market.pending_account_state_calculator(account, coll_amount + coll_in, debt_amount, 0)
+
+    return odos.get_route_calldata(zap, path_id), total_coll, health
 
 
-def get_decrease_loan_routing_data(zap, account, market, coll_amount, debt_amount):
-    # TODO
-    pass
+def get_decrease_loan_routing_data(zap, account, market, coll_amount, max_slippage=0.003):
+    """
+    Generates the `routingData` and `debtAmount` inputs for use with `LeverageZap.decreaseLoan`
+
+    Note that Odos' quotes are valid for 60 seconds, if the generated data is not used within
+    that timeframe it will need to be re-queried.
+
+    Args:
+        zap: Address of `LeverageZap` deployment on the connected chain
+        account: Address of the account that will adjust a loan
+        market: Address of the market where the loan is being adjusted
+        coll_amount: Collateral amount to be withdrawn from the loan. The entire amount is
+            swapped for stablecoins which are used to repay the loan.
+        max_slippage: Maximum allowable slippage in the router swap, denoted as a fraction.
+
+    Returns:
+        string: `routingData` for use in `LeverageZap.decreaseLoan`
+        int: Expected amount of debt to be repaid (`debtAmount` in `LeverageZap.decreaseLoan`).
+            If the call reverts, this number can be slightly reduced. Excess stablecoins are
+            returned to the caller.
+        int: New loan health after the adjustment
+    """
+
+    controller = Contract(CONTROLLER)
+    market = Contract(market)
+    collateral = Contract(controller.get_collateral(market))
+
+    debt_in, path_id = odos.get_quote(chain.id, zap, collateral, MONEY, coll_amount, max_slippage)
+
+    health = market.pending_account_state_calculator(account, -coll_amount, -debt_in, 0)
+
+    return odos.get_route_calldata(zap, path_id), debt_in, health
 
 
 def get_close_loan_routing_data(zap, account, market, use_account_balance=True, max_slippage=0.003):
